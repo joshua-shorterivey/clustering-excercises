@@ -59,7 +59,7 @@ def get_zillow_data():
         df = pd.read_csv('zillow_data.csv')
     else:
         df = pd.read_sql(sql, get_connection('zillow'))
-        df.to_csv('zillow.csv', index=False)
+        df.to_csv('zillow_data.csv', index=False)
     return df
 
 def nulls_by_col(df):
@@ -72,6 +72,7 @@ def nulls_by_col(df):
         }
     )
     return cols_missing
+
 def nulls_by_row(df):
     num_missing = df.isnull().sum(axis=1)
     prnt_miss = num_missing / df.shape[1] * 100
@@ -92,8 +93,8 @@ def summarize(df):
     print('Nulls By Column:', nulls_by_col(df))
     print('----')
     print('Nulls By Row:', nulls_by_row(df))
-    numerical_cols = df.select_dtypes(exclude='object').columns.to_list()
-    categorical_cols = df.select_dtypes(include='object').columns.to_list()
+    numerical_cols = df.select_dtypes(include='number').columns.to_list()
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns.to_list()
     print('value_counts: \n')
     for col in df.columns:
         print(f'Column Names: {col}')
@@ -106,6 +107,16 @@ def summarize(df):
     return
 
 def handle_missing_values(df, prop_required_columns=0.60, prop_required_row=0.75):
+    
+    #fill na values
+    df.heating.fillna('None', inplace=True)
+    df.aircon.fillna('None', inplace=True)
+    df.basementsqft.fillna(0,inplace=True)
+    df.garagecarcnt.fillna(0,inplace=True)
+    df.garagetotalsqft.fillna(0,inplace=True)
+    df.unitcnt.fillna(1,inplace=True)
+    df.poolcnt.fillna(0, inplace=True)
+
     threshold = int(round(prop_required_columns * len(df.index), 0))
     df = df.dropna(axis=1, thresh=threshold)
     threshold = int(round(prop_required_row * len(df.columns), 0))
@@ -114,6 +125,8 @@ def handle_missing_values(df, prop_required_columns=0.60, prop_required_row=0.75
     return df
 
 def split_data(df):
+
+    df = df.dropna()
     train_validate, test = train_test_split(df, test_size= .2, random_state=514)
     train, validate = train_test_split(train_validate, test_size= .3, random_state=514)
     print(train.shape, validate.shape, test.shape)
@@ -129,7 +142,7 @@ def scale_split_data (train, validate, test):
     test_scaled =  test.copy(deep=True)
 
     #create list of numeric columns for scaling
-    num_cols = train.select_dtypes(include='number')
+    num_cols = train.drop(columns=['logerror']).select_dtypes(include='number')
 
     #fit to data
     scaler.fit(num_cols)
@@ -140,6 +153,64 @@ def scale_split_data (train, validate, test):
     test_scaled[num_cols.columns] =  scaler.transform(test[num_cols.columns])
 
     return train_scaled, validate_scaled, test_scaled
+
+def engineer_features(df):
+    """
+    takes in dataframe (tailored use case for zillow)
+    makes an age feature
+    renames features
+    narrows down values of aircon
+    makes openness feature
+    makes tax/sqft feature
+    uses quantiles to categorize home size
+    makes est tax rate feature
+    renames county values
+    returns df
+    """
+
+    #remove unwanted columns, and reset index to id --> for the exercises
+    #age
+    df['age'] = 2022 - df['yearbuilt']
+
+    #rename 
+    df = df.rename(columns={'fips': 'county',
+                            'bedroomcnt': 'bedrooms', 
+                            'bathroomcnt':'bathrooms', 
+                            'calculatedfinishedsquarefeet': 'area', 
+                            'taxvaluedollarcnt': 'home_value',
+                            'yearbuilt': 'year_built', 
+                            'taxamount': 'tax_amount', 
+                            })
+
+    df = df[ (df["bedrooms"] > 0) | (df["bathrooms"] > 0) ]
+
+    #not best way due to adapting from encoding
+    df["aircon"] =  np.where(df.aircon == "None", "None",
+                                np.where(df.aircon == "Central", "Central", "Other"))
+
+    #not best way due to adapting from encoding
+    df["heating"] =  np.where(df.heating == "Central", "Central",
+                                np.where(df.heating == "None", "None",
+                                np.where(df.heating == "Floor/Wall", "Floor/Wall", "Other")))
+
+    ## feature to determine how open a house is likely to be
+    df["openness"] = df.area / (df.bathrooms + df.bedrooms)
+
+    ## feature to determine the relative tax per sqft
+    df["tax_per_sqft"] = df.structuretaxvaluedollarcnt / df.area
+    
+    #use quantiles to calculate subgroups and assign to new column
+    q1, q3 = df.area.quantile([.25, .75])
+    df['home_size'] = pd.cut(df.area, [0,q1,q3, df.area.max()], labels=['small', 'medium', 'large'], right=True)
+
+    #### Estimated Tax Rate
+    df['est_tax_rate'] = df.tax_amount / df.home_value
+    # value of home per square foot
+    df['val_per_sqft'] = df.home_value / df.area
+
+    df.county = df.county.map({6037: 'LA County', 6059: 'Orange County', 6111: 'Ventura County'})
+
+    return df
 
 def prep_zillow (df):
     """ 
@@ -157,23 +228,17 @@ def prep_zillow (df):
         X_test_scaled:
     """
 
-    #remove unwanted columns, and reset index to id --> for the exercises
-    df['age'] = 2022 - df['yearbuilt']
+    # #remove unwanted columns, and reset index to id --> for the exercises
+    df = engineer_features(df)
+
     df = df.drop(columns=['parcelid', 'buildingqualitytypeid','censustractandblock',
-                        'heatingorsystemtypeid', 'propertylandusetypeid', 'yearbuilt', 
-                        'rawcensustractandblock', 'landuse', 'fullbathcnt',
-                        'assessmentyear', 'regionidcounty','regionidzip', 'regionidcity'])
+                        'heatingorsystemtypeid', 'propertylandusetypeid', 'year_built', 
+                        'rawcensustractandblock', 'landuse', 'fullbathcnt', 'basementsqft',
+                        'assessmentyear', 'regionidcounty','regionidzip', 'regionidcity',
+                        'propertycountylandusecode', 'propertyzoningdesc', 'calculatedbathnbr',
+                        'finishedsquarefeet12', 'garagecarcnt', 'landtaxvaluedollarcnt',
+                        'structuretaxvaluedollarcnt', 'home_value', 'unitcnt', 'roomcnt'])
     df = df.set_index('id')
-
-    #fix data types
-    col_to_fix = ['fips', 'propertycountylandusecode',
-                'propertyzoningdesc']
-
-    for col in col_to_fix:
-        df[col] = df[col].astype('str')
-
-    #drop na/duplicates --> adjust this for project. think of columns to impute
-    df = df.dropna()
 
     # take care of any duplicates:
     df = df.drop_duplicates()
@@ -209,6 +274,8 @@ def wrangle_zillow():
     
     #drop columns that are unneeded, split data
     df, train, validate, test, train_scaled, validate_scaled, test_scaled = prep_zillow(df)
+
+    print(df.home_size)
 
     #summarize the data
     summarize(df)
